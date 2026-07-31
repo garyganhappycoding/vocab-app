@@ -3,7 +3,14 @@
 import { useEffect, useState } from "react";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { auth, googleProvider } from "@/lib/firebase";
-import { getUserProgress, recordWordLearned, saveSentence, recordWordStatus, getDueReviewWordIds } from "@/lib/progress";
+import {
+  getUserProgress,
+  recordWordLearned,
+  saveSentence,
+  recordWordStatus,
+  getDueReviewWordIds,
+  getAllWordStatuses,
+} from "@/lib/progress";
 
 const DAILY_GOAL = 10;
 const THEMES = ["Article", "Book Review", "Report", "Food", "Travel", "Environment", "School", "Friends", "Others"];
@@ -60,14 +67,28 @@ export default function Home() {
   const [progress, setProgress] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const [stage, setStage] = useState("picker"); // picker | front | flipped | marked | sentence | congrats | empty | review-picker | review-cards
+  const [stage, setStage] = useState("picker"); // picker | front | flipped | marked | sentence | congrats | empty | review-picker | review-cards | daily-limit | wrap-up
   const [selectedTheme, setSelectedTheme] = useState(null);
   const [originalWords, setOriginalWords] = useState([]);
   const [queue, setQueue] = useState([]);
   const [lastMarked, setLastMarked] = useState(null);
 
+  // Words currently being used for the sentence stage. Populated either from
+  // today's theme batch (originalWords, when the queue finishes naturally) or
+  // from a pool of every previously-learned word (when the daily goal is hit
+  // or the user exits) — see buildLearnedWordsPool().
+  const [sentenceWords, setSentenceWords] = useState([]);
   const [sentenceIndex, setSentenceIndex] = useState(0);
   const [sentenceDraft, setSentenceDraft] = useState("");
+  // Where to go once the current sentence round is finished.
+  const [sentenceCompletionTarget, setSentenceCompletionTarget] = useState("congrats");
+  const [sentenceLoading, setSentenceLoading] = useState(false);
+  // True once a pooled sentence round (daily-limit or wrap-up target) has been
+  // completed for the current learning stretch. Prevents Exit from prompting
+  // a second round right after the daily-goal checkpoint already ran one.
+  // Reset whenever a fresh batch of words starts (new theme, or continuing
+  // past today's goal), since exiting after that should gate on sentences again.
+  const [sentencesDoneForExit, setSentencesDoneForExit] = useState(false);
 
   const [reviewTheme, setReviewTheme] = useState(null);
   const [reviewWords, setReviewWords] = useState([]);
@@ -133,6 +154,7 @@ export default function Home() {
     setQueue(fetched);
     setPeekIndex(null);
     setPastGoalConfirmed(false);
+    setSentencesDoneForExit(false);
     setStage(fetched.length ? "front" : "empty");
   }
 
@@ -182,14 +204,56 @@ export default function Home() {
     setStage("marked");
   }
 
-function handleNextWord() {
+  // Builds the sentence-making pool from every word the user has ever
+  // recorded a status for (any of 学废了 / 不确定 / 背不起来), fetches full
+  // word content for them (same pattern as the /learned page), shuffles, and
+  // caps at DAILY_GOAL. Returns [] if the user has no history yet.
+  async function buildLearnedWordsPool(uid) {
+    const statuses = await getAllWordStatuses(uid);
+    if (!statuses.length) return [];
+    const idsParam = statuses.map((s) => s.id).join(",");
+    const res = await fetch(`/api/words?mode=byIds&ids=${encodeURIComponent(idsParam)}`);
+    const data = await res.json();
+    const contentById = new Map((data.words ?? []).map((w) => [w.id, w]));
+    const merged = statuses
+      .map((s) => {
+        const content = contentById.get(s.id);
+        return content ? { ...content, theme: content.theme ?? s.theme } : null;
+      })
+      .filter(Boolean);
+    const shuffled = [...merged].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, DAILY_GOAL);
+  }
+
+  // Kicks off a sentence-making round sourced from the learned-words pool,
+  // then routes to `completionTarget` once it's done. If there's no history
+  // to draw from yet, skips straight to the target.
+  async function startPooledSentenceRound(completionTarget) {
+    setSentenceLoading(true);
+    const pool = await buildLearnedWordsPool(user.uid);
+    setSentenceLoading(false);
+    if (pool.length === 0) {
+      setStage(completionTarget);
+      return;
+    }
+    setSentenceWords(pool);
+    setSentenceCompletionTarget(completionTarget);
+    setSentenceIndex(0);
+    setSentenceDraft("");
+    setStage("sentence");
+  }
+
+  async function handleNextWord() {
     if (queue.length === 0) {
+      setSentenceWords(originalWords);
+      setSentenceCompletionTarget("congrats");
       setSentenceIndex(0);
+      setSentenceDraft("");
       setStage("sentence");
       return;
     }
     if (wordsLearnedToday >= DAILY_GOAL && !pastGoalConfirmed) {
-      setStage("daily-limit");
+      await startPooledSentenceRound("daily-limit");
       return;
     }
     setStage("front");
@@ -197,20 +261,31 @@ function handleNextWord() {
 
   function handleContinuePastGoal() {
     setPastGoalConfirmed(true);
+    setSentencesDoneForExit(false);
     setStage("front");
   }
 
-  function handleExitSession() {
-    setStage("wrap-up");
+  // Exiting requires a sentence round first — but only once per learning
+  // stretch. If the daily-goal checkpoint already ran one (sentencesDoneForExit),
+  // pressing "I'm done for today" right after shouldn't prompt a second round.
+  async function handleExitSession() {
+    if (sentencesDoneForExit) {
+      setStage("wrap-up");
+      return;
+    }
+    await startPooledSentenceRound("wrap-up");
   }
 
   async function handleSubmitSentence() {
     if (!sentenceDraft.trim()) return;
-    const w = originalWords[sentenceIndex];
-    await saveSentence(user.uid, { theme: selectedTheme, word: w.word, sentence: sentenceDraft.trim() });
+    const w = sentenceWords[sentenceIndex];
+    await saveSentence(user.uid, { theme: w.theme || selectedTheme, word: w.word, wordId: w.id, sentence: sentenceDraft.trim() });
     setSentenceDraft("");
-    if (sentenceIndex + 1 >= originalWords.length) {
-      setStage("congrats");
+    if (sentenceIndex + 1 >= sentenceWords.length) {
+      if (sentenceCompletionTarget !== "congrats") {
+        setSentencesDoneForExit(true);
+      }
+      setStage(sentenceCompletionTarget);
     } else {
       setSentenceIndex((i) => i + 1);
     }
@@ -663,7 +738,12 @@ function handleNextWord() {
               </div>
 
               {!isPeeking && (
-                <button onClick={handleExitSession} style={{ color: C.inkFaint }} className="w-full text-center text-xs mt-3">
+                <button
+                  onClick={handleExitSession}
+                  disabled={sentenceLoading}
+                  style={{ color: C.inkFaint }}
+                  className="w-full text-center text-xs mt-3 disabled:opacity-40"
+                >
                   Exit for today
                 </button>
               )}
@@ -717,10 +797,11 @@ function handleNextWord() {
             <div className="flex gap-3 mt-4">
               <button
                 onClick={handleNextWord}
+                disabled={sentenceLoading}
                 style={{ background: C.spine, color: C.card }}
-                className="flex-1 rounded-lg py-2 text-sm font-medium"
+                className="flex-1 rounded-lg py-2 text-sm font-medium disabled:opacity-60"
               >
-                Next word →
+                {sentenceLoading ? "Loading…" : "Next word →"}
               </button>
             </div>
           </>
@@ -737,8 +818,9 @@ function handleNextWord() {
             <div className="flex gap-3">
               <button
                 onClick={handleExitSession}
+                disabled={sentenceLoading}
                 style={{ background: C.spine, color: C.card }}
-                className="flex-1 rounded-lg py-2 text-sm font-medium"
+                className="flex-1 rounded-lg py-2 text-sm font-medium disabled:opacity-60"
               >
                 I&apos;m done for today
               </button>
@@ -774,16 +856,16 @@ function handleNextWord() {
           </div>
         )}
 
-        {stage === "sentence" && originalWords[sentenceIndex] && (
+        {stage === "sentence" && sentenceWords[sentenceIndex] && (
           <div className="rounded-2xl p-6" style={{ background: C.card, border: `1px solid ${C.border}` }}>
             <p style={{ fontSize: 12, color: C.inkFaint }} className="mb-2">
-              Sentence {sentenceIndex + 1} / {originalWords.length}
+              Sentence {sentenceIndex + 1} / {sentenceWords.length}
             </p>
             <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 16, color: C.ink }} className="mb-1">
-              {originalWords[sentenceIndex].word}
+              {sentenceWords[sentenceIndex].word}
             </p>
             <p style={{ fontSize: 13, color: C.inkSoft }} className="mb-3">
-              {originalWords[sentenceIndex].sentencePrompt || `Write a sentence using "${originalWords[sentenceIndex].word}".`}
+              {sentenceWords[sentenceIndex].sentencePrompt || `Write a sentence using "${sentenceWords[sentenceIndex].word}".`}
             </p>
             <textarea
               value={sentenceDraft}
@@ -810,7 +892,7 @@ function handleNextWord() {
               🎉 Congrats!
             </p>
             <p style={{ fontSize: 15, color: C.ink }} className="mb-1">
-              You&apos;ve completed {originalWords.length} words and sentences in {selectedTheme}.
+              You&apos;ve completed {sentenceWords.length} words and sentences in {selectedTheme}.
             </p>
             <p style={{ fontSize: 13, color: C.inkFaint }} className="mb-4">
               Come back tomorrow to keep your streak alive.
