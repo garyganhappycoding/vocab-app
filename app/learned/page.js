@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebase";
-import { getAllWordStatuses } from "@/lib/progress";
+import { getAllWordStatuses, getAllSentences } from "@/lib/progress";
 
 const STATUS_TABS = [
   { key: "forgot", label: "背不起来", bg: "#F0DAD3", fg: "#8a3d2e", activeBg: "#C1665A" },
@@ -30,7 +30,7 @@ function BoldedSentence({ sentence, word }) {
 export default function LearnedWords() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [words, setWords] = useState([]); // merged status + Notion content
+  const [words, setWords] = useState([]); // merged status + Notion content + user sentences
   const [activeStatus, setActiveStatus] = useState("learned");
   const [activeTheme, setActiveTheme] = useState("all");
   const [expandedId, setExpandedId] = useState(null);
@@ -39,16 +39,39 @@ export default function LearnedWords() {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       if (u) {
-        const statuses = await getAllWordStatuses(u.uid);
+        const [statuses, sentenceRecords] = await Promise.all([
+          getAllWordStatuses(u.uid),
+          getAllSentences(u.uid),
+        ]);
+
         if (statuses.length) {
           const idsParam = statuses.map((s) => s.id).join(",");
           const res = await fetch(`/api/words?mode=byIds&ids=${encodeURIComponent(idsParam)}`);
           const data = await res.json();
           const contentById = new Map((data.words ?? []).map((w) => [w.id, w]));
+
+          // Group sentences by wordId (falling back to matching on the word
+          // text for any older records saved before wordId existed), oldest
+          // first so they read in the order they were written.
+          const sentencesByKey = new Map();
+          sentenceRecords.forEach((s) => {
+            const key = s.wordId || s.word?.toLowerCase();
+            if (!key) return;
+            const list = sentencesByKey.get(key) ?? [];
+            list.push(s);
+            sentencesByKey.set(key, list);
+          });
+          sentencesByKey.forEach((list) =>
+            list.sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0))
+          );
+
           const merged = statuses
             .map((s) => {
               const content = contentById.get(s.id);
-              return content ? { ...content, status: s.status, theme: s.theme } : null;
+              if (!content) return null;
+              const sentences =
+                sentencesByKey.get(s.id) ?? sentencesByKey.get(content.word?.toLowerCase()) ?? [];
+              return { ...content, status: s.status, theme: s.theme, sentences };
             })
             .filter(Boolean);
           setWords(merged);
@@ -231,6 +254,20 @@ export default function LearnedWords() {
                         <p style={{ fontSize: 12, color: "#8a7d63", borderTop: "1px solid #e8ddc8", paddingTop: 8, marginTop: 8 }}>
                           💡 {w.examinerTip}
                         </p>
+                      )}
+                      {w.sentences && w.sentences.length > 0 && (
+                        <div style={{ borderTop: "1px solid #e8ddc8", paddingTop: 8, marginTop: 8 }}>
+                          <p style={{ fontSize: 11, fontWeight: 600, color: "#8a7d63" }} className="mb-1.5">
+                            Your sentences:
+                          </p>
+                          <div className="flex flex-col gap-2">
+                            {w.sentences.map((s) => (
+                              <p key={s.id} style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: "#2B2620" }}>
+                                {s.sentence}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
                       )}
                     </div>
                   )}
