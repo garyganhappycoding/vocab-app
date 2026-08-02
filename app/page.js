@@ -81,6 +81,7 @@ export default function Home() {
   // Where to go once the current sentence round is finished.
   const [sentenceCompletionTarget, setSentenceCompletionTarget] = useState("congrats");
   const [sentenceLoading, setSentenceLoading] = useState(false);
+  const [continueLoading, setContinueLoading] = useState(false);
   // Words marked 学废了 since the last sentence round finished — this IS the
   // sentence pool. Grows as the user marks words across the daily-goal
   // checkpoint, "keep learning" cycles, and theme switches; clears every time
@@ -129,7 +130,12 @@ export default function Home() {
     signInWithPopup(auth, googleProvider);
   }
 
-  async function selectTheme(theme) {
+  // Fetches the next batch of words for a theme: due-review words plus new
+  // words after the current cursor, with anything already marked learned
+  // filtered out as a safety net. Shared by selectTheme (starting a theme)
+  // and handleContinuePastGoal (fetching another 10 when the user keeps
+  // learning past today's goal).
+  async function fetchThemeBatch(theme) {
     const cursor = progress?.themeCursors?.[theme] ?? 0;
 
     const [newRes, dueStatuses, learnedIds] = await Promise.all([
@@ -150,7 +156,11 @@ export default function Home() {
     // this theme, even if the cursor-based pagination would have returned it.
     const learnedIdSet = new Set(learnedIds);
     const newWords = (newRes.words ?? []).filter((w) => !learnedIdSet.has(w.id));
-    const fetched = [...dueWords, ...newWords];
+    return [...dueWords, ...newWords];
+  }
+
+  async function selectTheme(theme) {
+    const fetched = await fetchThemeBatch(theme);
 
     setSelectedTheme(theme);
     setOriginalWords(fetched);
@@ -257,9 +267,15 @@ export default function Home() {
     setStage("front");
   }
 
-  function handleContinuePastGoal() {
+  async function handleContinuePastGoal() {
     setPastGoalConfirmed(true);
-    setStage("front");
+    setContinueLoading(true);
+    const fetched = await fetchThemeBatch(selectedTheme);
+    setContinueLoading(false);
+    setOriginalWords(fetched);
+    setQueue(fetched);
+    setPeekIndex(null);
+    setStage(fetched.length ? "front" : "empty");
   }
 
   // Exit always passes through a sentence round for whatever's in the
@@ -816,10 +832,11 @@ export default function Home() {
               </button>
               <button
                 onClick={handleContinuePastGoal}
+                disabled={continueLoading}
                 style={{ background: C.card, border: `1px solid ${C.border}`, color: C.inkSoft }}
-                className="flex-1 rounded-lg py-2 text-sm font-medium"
+                className="flex-1 rounded-lg py-2 text-sm font-medium disabled:opacity-60"
               >
-                Keep learning
+                {continueLoading ? "Loading…" : "Keep learning"}
               </button>
             </div>
           </div>
