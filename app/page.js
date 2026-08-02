@@ -710,8 +710,9 @@ export default function Home() {
               {!isPeeking && (
                 <button
                   onClick={handleExitSession}
-                  style={{ color: C.inkFaint }}
-                  className="w-full text-center text-xs mt-3"
+                  disabled={wordsLearnedToday < DAILY_GOAL}
+                  style={{ color: wordsLearnedToday < DAILY_GOAL ? "#c4b8a0" : C.inkFaint }}
+                  className="w-full text-center text-xs mt-3 disabled:cursor-not-allowed"
                 >
                   Exit for today
                 </button>
