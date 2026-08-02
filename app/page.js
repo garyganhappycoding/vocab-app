@@ -10,6 +10,7 @@ import {
   recordWordStatus,
   getDueReviewWordIds,
   getLearnedWordIds,
+  getAllSentences,
 } from "@/lib/progress";
 
 const DAILY_GOAL = 10;
@@ -79,6 +80,7 @@ export default function Home() {
   const [sentenceDraft, setSentenceDraft] = useState("");
   // Where to go once the current sentence round is finished.
   const [sentenceCompletionTarget, setSentenceCompletionTarget] = useState("congrats");
+  const [sentenceLoading, setSentenceLoading] = useState(false);
   // Words marked 学废了 since the last sentence round finished — this IS the
   // sentence pool. Grows as the user marks words across the daily-goal
   // checkpoint, "keep learning" cycles, and theme switches; clears every time
@@ -210,28 +212,46 @@ export default function Home() {
     setStage("marked");
   }
 
-  // Starts a sentence round from the current batch, then routes to
-  // `completionTarget` once it's done. If the batch is empty, skips straight
-  // to the target instead of showing an empty round.
-  function startSentenceRound(completionTarget) {
+  // Starts a sentence round from the current batch, excluding any word that
+  // already has a saved sentence from before (so a word is only ever
+  // prompted for a sentence once, ever — not just once per batch). Routes to
+  // `completionTarget` once done; if nothing's left to sentence, skips
+  // straight to the target instead of showing an empty round.
+  async function startSentenceRound(completionTarget) {
     if (pendingSentenceBatch.length === 0) {
       setStage(completionTarget);
       return;
     }
-    setSentenceWords(pendingSentenceBatch);
+    setSentenceLoading(true);
+    const sentenceRecords = await getAllSentences(user.uid);
+    setSentenceLoading(false);
+    const sentencedIds = new Set(sentenceRecords.map((s) => s.wordId).filter(Boolean));
+    const sentencedWordTexts = new Set(
+      sentenceRecords.filter((s) => !s.wordId).map((s) => s.word?.toLowerCase()).filter(Boolean)
+    );
+    const pool = pendingSentenceBatch.filter(
+      (w) => !sentencedIds.has(w.id) && !sentencedWordTexts.has(w.word?.toLowerCase())
+    );
+
+    if (pool.length === 0) {
+      setPendingSentenceBatch([]);
+      setStage(completionTarget);
+      return;
+    }
+    setSentenceWords(pool);
     setSentenceCompletionTarget(completionTarget);
     setSentenceIndex(0);
     setSentenceDraft("");
     setStage("sentence");
   }
 
-  function handleNextWord() {
+  async function handleNextWord() {
     if (wordsLearnedToday >= DAILY_GOAL && !pastGoalConfirmed) {
-      startSentenceRound("daily-limit");
+      await startSentenceRound("daily-limit");
       return;
     }
     if (queue.length === 0) {
-      startSentenceRound("congrats");
+      await startSentenceRound("congrats");
       return;
     }
     setStage("front");
@@ -244,8 +264,8 @@ export default function Home() {
 
   // Exit always passes through a sentence round for whatever's in the
   // current batch — however many words that is (could be 5, could be 10).
-  function handleExitSession() {
-    startSentenceRound("wrap-up");
+  async function handleExitSession() {
+    await startSentenceRound("wrap-up");
   }
 
   async function handleSubmitSentence() {
@@ -710,7 +730,7 @@ export default function Home() {
               {!isPeeking && (
                 <button
                   onClick={handleExitSession}
-                  disabled={wordsLearnedToday < DAILY_GOAL}
+                  disabled={wordsLearnedToday < DAILY_GOAL || sentenceLoading}
                   style={{ color: wordsLearnedToday < DAILY_GOAL ? "#c4b8a0" : C.inkFaint }}
                   className="w-full text-center text-xs mt-3 disabled:cursor-not-allowed"
                 >
@@ -767,10 +787,11 @@ export default function Home() {
             <div className="flex gap-3 mt-4">
               <button
                 onClick={handleNextWord}
+                disabled={sentenceLoading}
                 style={{ background: C.spine, color: C.card }}
-                className="flex-1 rounded-lg py-2 text-sm font-medium"
+                className="flex-1 rounded-lg py-2 text-sm font-medium disabled:opacity-60"
               >
-                Next word →
+                {sentenceLoading ? "Loading…" : "Next word →"}
               </button>
             </div>
           </>
@@ -787,8 +808,9 @@ export default function Home() {
             <div className="flex gap-3">
               <button
                 onClick={handleExitSession}
+                disabled={sentenceLoading}
                 style={{ background: C.spine, color: C.card }}
-                className="flex-1 rounded-lg py-2 text-sm font-medium"
+                className="flex-1 rounded-lg py-2 text-sm font-medium disabled:opacity-60"
               >
                 I&apos;m done for today
               </button>
